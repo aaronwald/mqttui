@@ -12,8 +12,11 @@ func main() {
 	// Initialize the MQTT TUI application
 	app := NewApp()
 
-	// Create the Bubble Tea program
-	p := tea.NewProgram(app, tea.WithAltScreen())
+	// Create the Bubble Tea program with options for proper terminal handling
+	p := tea.NewProgram(
+		app,
+		tea.WithAltScreen(),
+	)
 
 	// Set the program reference in MQTT client for sending messages
 	if app.mqtt != nil {
@@ -24,9 +27,7 @@ func main() {
 	if _, err := p.Run(); err != nil {
 		log.Fatal(err)
 	}
-}
-
-// App represents the main application state
+} // App represents the main application state
 type App struct {
 	mqtt     *MQTTClient
 	ui       *UI
@@ -84,6 +85,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		// Pass window size to UI first
+		var uiCmd tea.Cmd
+		a.ui, uiCmd = a.ui.Update(msg)
+		if uiCmd != nil {
+			cmds = append(cmds, uiCmd)
+		}
+		return a, tea.Batch(cmds...)
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":

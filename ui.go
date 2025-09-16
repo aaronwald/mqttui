@@ -14,6 +14,7 @@ import (
 type UI struct {
 	topics           []string
 	selectedTopic    int
+	topicScroll      int
 	subscribedTopics map[string]bool
 	messages         []Message
 	messageScroll    int
@@ -144,7 +145,9 @@ func (ui *UI) handleKeyPress(msg tea.KeyMsg) (*UI, tea.Cmd) {
 				ui.selectedTopic++
 			}
 		} else {
-			ui.messageScroll++
+			if ui.messageScroll < len(ui.messages)-1 {
+				ui.messageScroll++
+			}
 		}
 	case "enter", " ":
 		if ui.activePane == TopicsPane && len(ui.topics) > 0 {
@@ -161,21 +164,37 @@ func (ui *UI) handleKeyPress(msg tea.KeyMsg) (*UI, tea.Cmd) {
 
 // View implements tea.Model
 func (ui *UI) View() string {
-	if ui.width == 0 {
-		return "Initializing..."
+	if ui.width == 0 || ui.height == 0 {
+		return "Initializing interface..."
 	}
 
-	// Calculate dimensions
-	topicsWidth := ui.width / 3
-	messagesWidth := ui.width - topicsWidth - 2
+	// Calculate dimensions for better layout
+	totalWidth := ui.width
+	totalHeight := ui.height
+
+	// Reserve space for title and help
+	availableHeight := totalHeight - 4
+	if availableHeight < 10 {
+		availableHeight = 10
+	}
+
+	// Calculate panel widths (1/3 for topics, 2/3 for messages)
+	topicsWidth := totalWidth / 3
+	if topicsWidth < 20 {
+		topicsWidth = 20
+	}
+	messagesWidth := totalWidth - topicsWidth - 2
+	if messagesWidth < 30 {
+		messagesWidth = 30
+	}
 
 	// Create the topics view
-	topicsView := ui.renderTopicsPane(topicsWidth, ui.height-4)
+	topicsView := ui.renderTopicsPane(topicsWidth, availableHeight)
 
 	// Create the messages view
-	messagesView := ui.renderMessagesPane(messagesWidth, ui.height-4)
+	messagesView := ui.renderMessagesPane(messagesWidth, availableHeight)
 
-	// Combine the views
+	// Combine the views horizontally
 	content := lipgloss.JoinHorizontal(
 		lipgloss.Top,
 		topicsView,
@@ -183,27 +202,30 @@ func (ui *UI) View() string {
 	)
 
 	// Add title and help
-	title := ui.styles.Title.Render("MQTT TUI Browser")
+	title := ui.styles.Title.Render(fmt.Sprintf("MQTT TUI Browser [%dx%d]", ui.width, ui.height))
 	help := ui.renderHelp()
 
-	// Add error if present
+	// Combine everything vertically
+	var result string
 	if ui.error != "" {
 		errorMsg := ui.styles.Error.Render(fmt.Sprintf("Error: %s", ui.error))
-		return lipgloss.JoinVertical(
+		result = lipgloss.JoinVertical(
 			lipgloss.Left,
 			title,
 			content,
 			errorMsg,
 			help,
 		)
+	} else {
+		result = lipgloss.JoinVertical(
+			lipgloss.Left,
+			title,
+			content,
+			help,
+		)
 	}
 
-	return lipgloss.JoinVertical(
-		lipgloss.Left,
-		title,
-		content,
-		help,
-	)
+	return result
 }
 
 // renderTopicsPane renders the topics list pane
@@ -213,28 +235,64 @@ func (ui *UI) renderTopicsPane(width, height int) string {
 		title += fmt.Sprintf(" (%d)", len(ui.topics))
 	}
 
-	var items []string
-	for i, topic := range ui.topics {
-		prefix := "  "
-		if ui.subscribedTopics[topic] {
-			prefix = "✓ "
-		}
-
-		item := prefix + topic
-		if i == ui.selectedTopic && ui.activePane == TopicsPane {
-			item = ui.styles.SelectedItem.Render(item)
-		} else {
-			item = ui.styles.UnselectedItem.Render(item)
-		}
-		items = append(items, item)
+	// Calculate available space for topics (minus title and borders)
+	availableLines := height - 3
+	if availableLines < 1 {
+		availableLines = 1
 	}
 
-	if len(items) == 0 {
+	var items []string
+	
+	if len(ui.topics) == 0 {
 		items = append(items, ui.styles.UnselectedItem.Render("No topics discovered yet..."))
+	} else {
+		// Calculate scroll position to keep selected topic visible
+		ui.updateTopicScroll(availableLines)
+		
+		// Render visible topics
+		startIdx := ui.topicScroll
+		endIdx := startIdx + availableLines
+		if endIdx > len(ui.topics) {
+			endIdx = len(ui.topics)
+		}
+
+		for i := startIdx; i < endIdx; i++ {
+			topic := ui.topics[i]
+			prefix := "  "
+			if ui.subscribedTopics[topic] {
+				prefix = "✓ "
+			}
+
+			// Truncate long topic names to fit
+			maxTopicLen := width - 8 // Account for prefix, padding, and border
+			if maxTopicLen < 10 {
+				maxTopicLen = 10
+			}
+			displayTopic := topic
+			if len(topic) > maxTopicLen {
+				displayTopic = topic[:maxTopicLen-3] + "..."
+			}
+
+			item := prefix + displayTopic
+			if i == ui.selectedTopic && ui.activePane == TopicsPane {
+				item = ui.styles.SelectedItem.Render(item)
+			} else {
+				item = ui.styles.UnselectedItem.Render(item)
+			}
+			items = append(items, item)
+		}
+		
+		// Add scroll indicators
+		if ui.topicScroll > 0 {
+			title += " ↑"
+		}
+		if endIdx < len(ui.topics) {
+			title += " ↓"
+		}
 	}
 
 	content := strings.Join(items, "\n")
-
+	
 	style := ui.styles.InactivePane
 	if ui.activePane == TopicsPane {
 		style = ui.styles.ActivePane
@@ -257,41 +315,65 @@ func (ui *UI) renderMessagesPane(width, height int) string {
 		title += fmt.Sprintf(" (%d)", len(ui.messages))
 	}
 
+	// Calculate available space for messages
+	availableLines := height - 3
+	if availableLines < 1 {
+		availableLines = 1
+	}
+
 	var items []string
-	startIdx := ui.messageScroll
-	endIdx := startIdx + height - 3 // Account for title and padding
-
-	if endIdx > len(ui.messages) {
-		endIdx = len(ui.messages)
-	}
-	if startIdx >= endIdx {
-		startIdx = endIdx - 1
-		if startIdx < 0 {
-			startIdx = 0
-		}
-	}
-
-	for i := startIdx; i < endIdx; i++ {
-		msg := ui.messages[i]
-		timeStr := msg.Timestamp.Format("15:04:05")
-
-		topicLine := ui.styles.MessageTopic.Render(msg.Topic) +
-			" " + ui.styles.MessageTime.Render(timeStr)
-
-		// Wrap payload text
-		payloadLines := ui.wrapText(msg.Payload, width-4)
-
-		messageContent := lipgloss.JoinVertical(
-			lipgloss.Left,
-			topicLine,
-			strings.Join(payloadLines, "\n"),
-		)
-
-		items = append(items, ui.styles.Message.Render(messageContent))
-	}
-
-	if len(items) == 0 {
+	
+	if len(ui.messages) == 0 {
 		items = append(items, ui.styles.UnselectedItem.Render("No messages yet..."))
+	} else {
+		// Ensure scroll position is valid
+		maxScroll := len(ui.messages) - availableLines
+		if maxScroll < 0 {
+			maxScroll = 0
+		}
+		if ui.messageScroll > maxScroll {
+			ui.messageScroll = maxScroll
+		}
+		if ui.messageScroll < 0 {
+			ui.messageScroll = 0
+		}
+
+		startIdx := ui.messageScroll
+		endIdx := startIdx + availableLines
+		if endIdx > len(ui.messages) {
+			endIdx = len(ui.messages)
+		}
+
+		for i := startIdx; i < endIdx; i++ {
+			msg := ui.messages[i]
+			timeStr := msg.Timestamp.Format("15:04:05")
+
+			topicLine := ui.styles.MessageTopic.Render(msg.Topic) +
+				" " + ui.styles.MessageTime.Render(timeStr)
+
+			// Wrap payload text to fit width
+			maxPayloadWidth := width - 6 // Account for padding and border
+			if maxPayloadWidth < 20 {
+				maxPayloadWidth = 20
+			}
+			payloadLines := ui.wrapText(msg.Payload, maxPayloadWidth)
+
+			messageContent := lipgloss.JoinVertical(
+				lipgloss.Left,
+				topicLine,
+				strings.Join(payloadLines, "\n"),
+			)
+
+			items = append(items, ui.styles.Message.Render(messageContent))
+		}
+		
+		// Add scroll indicators
+		if ui.messageScroll > 0 {
+			title += " ↑"
+		}
+		if endIdx < len(ui.messages) {
+			title += " ↓"
+		}
 	}
 
 	content := strings.Join(items, "\n")
@@ -313,7 +395,7 @@ func (ui *UI) renderMessagesPane(width, height int) string {
 
 // renderHelp renders the help text
 func (ui *UI) renderHelp() string {
-	help := "↑/↓ navigate • tab switch panes • enter/space toggle subscription • r reset messages • q quit"
+	help := "↑/↓ navigate/scroll • tab switch panes • enter/space toggle subscription • r reset messages • q quit"
 	return ui.styles.Help.Render(help)
 }
 
@@ -367,6 +449,7 @@ func (ui *UI) SetTopics(topics []string) {
 	if ui.selectedTopic < 0 {
 		ui.selectedTopic = 0
 	}
+	ui.topicScroll = 0 // Reset scroll when topics change
 }
 
 // AddMessage adds a new message to the messages list
@@ -379,9 +462,13 @@ func (ui *UI) AddMessage(topic, payload string, timestamp time.Time) {
 
 	ui.messages = append(ui.messages, message)
 
-	// Auto-scroll to bottom when new message arrives
-	if ui.activePane == MessagesPane {
+	// Auto-scroll to bottom for new messages (keep showing latest)
+	// Only auto-scroll if we're already at or near the bottom
+	if ui.activePane == MessagesPane || ui.messageScroll >= len(ui.messages)-5 {
 		ui.messageScroll = len(ui.messages) - 1
+		if ui.messageScroll < 0 {
+			ui.messageScroll = 0
+		}
 	}
 }
 
@@ -399,4 +486,39 @@ func (ui *UI) GetSubscribedTopics() []string {
 		}
 	}
 	return subscribed
+}
+
+// updateTopicScroll adjusts the scroll position to keep the selected topic visible
+func (ui *UI) updateTopicScroll(visibleLines int) {
+	if len(ui.topics) == 0 {
+		ui.topicScroll = 0
+		return
+	}
+
+	// Ensure selected topic is within bounds
+	if ui.selectedTopic < 0 {
+		ui.selectedTopic = 0
+	}
+	if ui.selectedTopic >= len(ui.topics) {
+		ui.selectedTopic = len(ui.topics) - 1
+	}
+
+	// Adjust scroll to keep selected topic visible
+	if ui.selectedTopic < ui.topicScroll {
+		ui.topicScroll = ui.selectedTopic
+	} else if ui.selectedTopic >= ui.topicScroll+visibleLines {
+		ui.topicScroll = ui.selectedTopic - visibleLines + 1
+	}
+
+	// Ensure scroll is within bounds
+	if ui.topicScroll < 0 {
+		ui.topicScroll = 0
+	}
+	maxScroll := len(ui.topics) - visibleLines
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if ui.topicScroll > maxScroll {
+		ui.topicScroll = maxScroll
+	}
 }
